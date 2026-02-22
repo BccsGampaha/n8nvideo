@@ -93,7 +93,7 @@ def add_video(job_id):
 # -----------------------------
 # 3️⃣ Status
 # -----------------------------
-@app.route("/status/<job_id>", methods=["GET"])
+@app.route("/status/<job_id>", methods=["POST"])
 def status(job_id):
     if job_id not in jobs:
         return jsonify({"error": "Job not found"}), 404
@@ -109,7 +109,7 @@ def status(job_id):
 # -----------------------------
 # 4️⃣ Download
 # -----------------------------
-@app.route("/download/<job_id>", methods=["GET"])
+@app.route("/download/<job_id>", methods=["POST"])
 def download(job_id):
     if job_id not in jobs:
         return jsonify({"error": "Job not found"}), 404
