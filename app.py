@@ -1,6 +1,7 @@
 import os
 import uuid
 import threading
+import time
 from flask import Flask, request, jsonify, send_file
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 
@@ -8,33 +9,113 @@ app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "outputs"
+JOB_EXPIRY_SECONDS = 2 * 60 * 60  # 2 hours
+
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 jobs = {}  # In-memory job storage
+jobs_lock = threading.Lock()
 
 
 # -----------------------------
-# Background merge
+# Helpers
 # -----------------------------
-def merge_videos(job_id):
-    job = jobs[job_id]
-    job["status"] = "merging"
+
+def delete_file_safe(path):
+    """Delete a file silently if it exists."""
     try:
-        clips = [VideoFileClip(path) for path in job["files"]]
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def cleanup_job(job_id):
+    """
+    Delete all uploaded part files and the merged output file for a job,
+    then remove the job from memory.
+    """
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return
+
+        # Delete all uploaded video parts
+        for path in job.get("files", []):
+            delete_file_safe(path)
+
+        # Delete the merged output
+        delete_file_safe(job.get("output"))
+
+        # Remove from memory
+        del jobs[job_id]
+
+
+def expire_job_if_incomplete(job_id):
+    """
+    Background thread: wait JOB_EXPIRY_SECONDS, then if the job never
+    received all videos (still in waiting/processing state), clean it up.
+    """
+    time.sleep(JOB_EXPIRY_SECONDS)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return  # Already cleaned up
+        if job["status"] in ("waiting", "processing", "merging"):
+            job["status"] = "expired"
+
+    # Cleanup outside the lock to avoid holding it during file I/O
+    cleanup_job(job_id)
+
+
+def merge_videos(job_id):
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return
+        job["status"] = "merging"
+        files_snapshot = list(job["files"])
+
+    try:
+        clips = [VideoFileClip(path) for path in files_snapshot]
         final = concatenate_videoclips(clips)
         output_path = os.path.join(OUTPUT_FOLDER, f"{job_id}.mp4")
-        final.write_videofile(output_path)
-        job["output"] = output_path
-        job["status"] = "completed"
+        final.write_videofile(output_path, logger=None)
+
+        # Close clips to release file handles before deleting parts
+        for clip in clips:
+            clip.close()
+        final.close()
+
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job:
+                job["output"] = output_path
+                job["status"] = "completed"
+
+        # Delete uploaded parts now that merge is done
+        for path in files_snapshot:
+            delete_file_safe(path)
+
+        # Clear the files list so cleanup_job won't try to delete them again
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job:
+                job["files"] = []
+
     except Exception as e:
-        job["status"] = "failed"
-        job["error"] = str(e)
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job:
+                job["status"] = "failed"
+                job["error"] = str(e)
 
 
 # -----------------------------
-# 1️⃣ Create Job
+# 1. Create Job
 # -----------------------------
+
 @app.route("/create-job", methods=["POST"])
 def create_job():
     total_videos = int(request.form.get("total_videos", 0))
@@ -42,28 +123,35 @@ def create_job():
         return jsonify({"error": "Invalid total_videos"}), 400
 
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
-        "total": total_videos,
-        "received": 0,
-        "files": [],
-        "status": "waiting",
-        "output": None
-    }
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "total": total_videos,
+            "received": 0,
+            "files": [],
+            "status": "waiting",
+            "output": None,
+            "created_at": time.time()
+        }
+
+    # Start expiry watcher thread
+    threading.Thread(target=expire_job_if_incomplete, args=(job_id,), daemon=True).start()
+
     return jsonify({"job_id": job_id})
 
 
 # -----------------------------
-# 2️⃣ Upload video file
+# 2. Upload Video Part
 # -----------------------------
+
 @app.route("/add-video/<job_id>", methods=["POST"])
 def add_video(job_id):
-    if job_id not in jobs:
-        return jsonify({"error": "Job not found"}), 404
-
-    job = jobs[job_id]
-
-    if job["status"] not in ["waiting"]:
-        return jsonify({"error": "Job already processing or finished"}), 400
+    with jobs_lock:
+        if job_id not in jobs:
+            return jsonify({"error": "Job not found"}), 404
+        job = jobs[job_id]
+        if job["status"] not in ("waiting",):
+            return jsonify({"error": "Job already processing, finished, or expired"}), 400
 
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
@@ -72,52 +160,87 @@ def add_video(job_id):
     if file.filename == "":
         return jsonify({"error": "No file selected"}), 400
 
-    filename = os.path.join(UPLOAD_FOLDER, f"{job_id}_{job['received']}.mp4")
-    file.save(filename)
+    with jobs_lock:
+        index = job["received"]
+        filename = os.path.join(UPLOAD_FOLDER, f"{job_id}_{index}.mp4")
+        file.save(filename)
+        job["files"].append(filename)
+        job["received"] += 1
+        received = job["received"]
+        total = job["total"]
 
-    job["files"].append(filename)
-    job["received"] += 1
+        if received == total:
+            job["status"] = "processing"
+            files_ready = True
+        else:
+            files_ready = False
 
-    # Start merge automatically
-    if job["received"] == job["total"]:
-        job["status"] = "processing"
-        threading.Thread(target=merge_videos, args=(job_id,)).start()
+    if files_ready:
+        threading.Thread(target=merge_videos, args=(job_id,), daemon=True).start()
 
     return jsonify({
         "message": "Video received",
-        "received": job["received"],
-        "total": job["total"]
+        "received": received,
+        "total": total
     })
 
 
 # -----------------------------
-# 3️⃣ Status
+# 3. Status
 # -----------------------------
+
 @app.route("/status/<job_id>", methods=["POST"])
 def status(job_id):
-    if job_id not in jobs:
-        return jsonify({"error": "Job not found"}), 404
-    job = jobs[job_id]
-    return jsonify({
-        "status": job["status"],
-        "received": job["received"],
-        "total": job["total"],
-        "error": job.get("error")
-    })
+    with jobs_lock:
+        if job_id not in jobs:
+            return jsonify({"error": "Job not found"}), 404
+        job = jobs[job_id]
+        return jsonify({
+            "status": job["status"],
+            "received": job["received"],
+            "total": job["total"],
+            "error": job.get("error"),
+            "age_seconds": int(time.time() - job.get("created_at", time.time()))
+        })
 
 
 # -----------------------------
-# 4️⃣ Download
+# 4. Download Merged Video
 # -----------------------------
-@app.route("/download/<job_id>", methods=["POST"])
+
+@app.route("/download/<job_id>", methods=["GET"])
 def download(job_id):
-    if job_id not in jobs:
-        return jsonify({"error": "Job not found"}), 404
-    job = jobs[job_id]
-    if job["status"] != "completed":
-        return jsonify({"error": "Job not completed"}), 400
-    return send_file(job["output"], as_attachment=True)
+    with jobs_lock:
+        if job_id not in jobs:
+            return jsonify({"error": "Job not found"}), 404
+        job = jobs[job_id]
+        if job["status"] != "completed":
+            return jsonify({"error": f"Job not completed (status: {job['status']})"}), 400
+        output_path = job["output"]
 
+    if not output_path or not os.path.exists(output_path):
+        return jsonify({"error": "Output file missing"}), 500
+
+    # Stream the file, then schedule cleanup after response is sent
+    response = send_file(
+        output_path,
+        mimetype="video/mp4",
+        as_attachment=True,
+        download_name=f"{job_id}.mp4"
+    )
+
+    # Trigger cleanup after the file is fully sent
+    @response.call_on_close
+    def do_cleanup():
+        cleanup_job(job_id)
+
+    return response
+
+
+# -----------------------------
+# Run
+# -----------------------------
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
