@@ -40,33 +40,35 @@ def cleanup_job(job_id):
         job = jobs.get(job_id)
         if not job:
             return
-
-        # Delete all uploaded video parts
-        for path in job.get("files", []):
-            delete_file_safe(path)
-
-        # Delete the merged output
-        delete_file_safe(job.get("output"))
-
-        # Remove from memory
+        files_to_delete = list(job.get("files", []))
+        output_to_delete = job.get("output")
         del jobs[job_id]
+
+    for path in files_to_delete:
+        delete_file_safe(path)
+    delete_file_safe(output_to_delete)
 
 
 def expire_job_if_incomplete(job_id):
     """
     Background thread: wait JOB_EXPIRY_SECONDS, then if the job never
-    received all videos (still in waiting/processing state), clean it up.
+    received all videos (still stuck), clean it up.
     """
     time.sleep(JOB_EXPIRY_SECONDS)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
-            return  # Already cleaned up
-        if job["status"] in ("waiting", "processing", "merging"):
-            job["status"] = "expired"
+            return
+        if job["status"] in ("receiving", "processing", "merging"):
+            files_to_delete = list(job.get("files", []))
+            output_to_delete = job.get("output")
+            del jobs[job_id]
+        else:
+            return  # completed or already cleaned up — do nothing
 
-    # Cleanup outside the lock to avoid holding it during file I/O
-    cleanup_job(job_id)
+    for path in files_to_delete:
+        delete_file_safe(path)
+    delete_file_safe(output_to_delete)
 
 
 def merge_videos(job_id):
@@ -88,21 +90,16 @@ def merge_videos(job_id):
             clip.close()
         final.close()
 
+        # Delete uploaded parts now that merge is done
+        for path in files_snapshot:
+            delete_file_safe(path)
+
         with jobs_lock:
             job = jobs.get(job_id)
             if job:
                 job["output"] = output_path
                 job["status"] = "completed"
-
-        # Delete uploaded parts now that merge is done
-        for path in files_snapshot:
-            delete_file_safe(path)
-
-        # Clear the files list so cleanup_job won't try to delete them again
-        with jobs_lock:
-            job = jobs.get(job_id)
-            if job:
-                job["files"] = []
+                job["files"] = []  # Already deleted above
 
     except Exception as e:
         with jobs_lock:
@@ -129,13 +126,19 @@ def create_job():
             "total": total_videos,
             "received": 0,
             "files": [],
-            "status": "waiting",
+            # KEY FIX: "receiving" status accepts ALL part uploads.
+            # Only transitions to "processing" once received == total.
+            "status": "receiving",
             "output": None,
             "created_at": time.time()
         }
 
     # Start expiry watcher thread
-    threading.Thread(target=expire_job_if_incomplete, args=(job_id,), daemon=True).start()
+    threading.Thread(
+        target=expire_job_if_incomplete,
+        args=(job_id,),
+        daemon=True
+    ).start()
 
     return jsonify({"job_id": job_id})
 
@@ -149,18 +152,23 @@ def add_video(job_id):
     with jobs_lock:
         if job_id not in jobs:
             return jsonify({"error": "Job not found"}), 404
+
         job = jobs[job_id]
-        if job["status"] not in ("waiting",):
-            return jsonify({"error": "Job already processing, finished, or expired"}), 400
 
-    if "file" not in request.files:
-        return jsonify({"error": "No file part"}), 400
+        # Accept uploads only while still receiving parts.
+        # "processing" / "merging" / "completed" mean we already have all files.
+        if job["status"] != "receiving":
+            return jsonify({
+                "error": f"Cannot upload to job with status '{job['status']}'"
+            }), 400
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
+        if "file" not in request.files:
+            return jsonify({"error": "No file part"}), 400
 
-    with jobs_lock:
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
         index = job["received"]
         filename = os.path.join(UPLOAD_FOLDER, f"{job_id}_{index}.mp4")
         file.save(filename)
@@ -169,14 +177,19 @@ def add_video(job_id):
         received = job["received"]
         total = job["total"]
 
+        # Transition to "processing" only once ALL parts have arrived
         if received == total:
             job["status"] = "processing"
-            files_ready = True
+            start_merge = True
         else:
-            files_ready = False
+            start_merge = False
 
-    if files_ready:
-        threading.Thread(target=merge_videos, args=(job_id,), daemon=True).start()
+    if start_merge:
+        threading.Thread(
+            target=merge_videos,
+            args=(job_id,),
+            daemon=True
+        ).start()
 
     return jsonify({
         "message": "Video received",
@@ -215,13 +228,14 @@ def download(job_id):
             return jsonify({"error": "Job not found"}), 404
         job = jobs[job_id]
         if job["status"] != "completed":
-            return jsonify({"error": f"Job not completed (status: {job['status']})"}), 400
+            return jsonify({
+                "error": f"Job not completed (current status: {job['status']})"
+            }), 400
         output_path = job["output"]
 
     if not output_path or not os.path.exists(output_path):
         return jsonify({"error": "Output file missing"}), 500
 
-    # Stream the file, then schedule cleanup after response is sent
     response = send_file(
         output_path,
         mimetype="video/mp4",
@@ -229,7 +243,7 @@ def download(job_id):
         download_name=f"{job_id}.mp4"
     )
 
-    # Trigger cleanup after the file is fully sent
+    # Clean up everything once the file is fully streamed back
     @response.call_on_close
     def do_cleanup():
         cleanup_job(job_id)
