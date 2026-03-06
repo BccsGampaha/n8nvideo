@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VideoForge — Job Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0a0f; --surface:#111118; --card:#16161f; --border:#1e1e2e;
+    --accent:#7c6af7; --accent2:#f76a8c;
+    --green:#4ade80; --yellow:#fbbf24; --red:#f87171; --blue:#60a5fa;
+    --text:#e4e4f0; --muted:#5a5a7a;
+    --mono:'Space Mono',monospace; --sans:'DM Sans',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;overflow-x:hidden;}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(124,106,247,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(124,106,247,.04) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0;}
+  .wrap{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:40px 24px 80px;}
+
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:48px;padding-bottom:24px;border-bottom:1px solid var(--border);}
+  .logo{display:flex;align-items:center;gap:12px;}
+  .logo-icon{width:40px;height:40px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;}
+  .logo-text{font-family:var(--mono);font-size:16px;font-weight:700;letter-spacing:-.5px;}
+  .logo-sub{font-size:11px;color:var(--muted);margin-top:1px;font-family:var(--mono);}
+  .header-right{display:flex;align-items:center;gap:16px;}
+  .server-input{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 14px;}
+  .server-input label{font-size:11px;color:var(--muted);font-family:var(--mono);white-space:nowrap;}
+  .server-input input{background:none;border:none;outline:none;color:var(--text);font-family:var(--mono);font-size:12px;width:220px;}
+  .pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite;}
+  .pulse-dot.off{background:var(--muted);box-shadow:none;animation:none;}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(1.3);}}
+
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:32px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;}
+  .stat-val{font-family:var(--mono);font-size:28px;font-weight:700;}
+  .stat-label{font-size:11px;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.08em;}
+
+  .section-title{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:14px;}
+
+  .lookup{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:28px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+  .lookup label{font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap;}
+  .lookup input{flex:1;min-width:240px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 14px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none;}
+  .lookup input:focus{border-color:var(--accent);}
+  .btn{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;border-radius:8px;padding:9px 20px;color:#fff;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity .15s;}
+  .btn:hover{opacity:.85;}
+  .btn-ghost{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 16px;color:var(--muted);font-family:var(--mono);font-size:11px;cursor:pointer;transition:all .15s;}
+  .btn-ghost:hover{border-color:var(--accent);color:var(--text);}
+
+  .refresh-row{display:flex;align-items:center;gap:10px;margin-bottom:16px;}
+  .next-refresh{font-family:var(--mono);font-size:11px;color:var(--muted);}
+
+  .jobs-list{display:flex;flex-direction:column;gap:16px;}
+  .job-card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;transition:border-color .2s;}
+  .job-card:hover{border-color:var(--accent);}
+  .job-card.status-merging{border-left:3px solid var(--yellow);}
+  .job-card.status-completed{border-left:3px solid var(--green);}
+  .job-card.status-failed{border-left:3px solid var(--red);}
+  .job-card.status-receiving{border-left:3px solid var(--blue);}
+  .job-card.status-processing{border-left:3px solid var(--accent);}
+
+  .job-header{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 14px;cursor:pointer;user-select:none;}
+  .job-id-block{display:flex;align-items:center;gap:10px;}
+  .job-id{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--surface);padding:3px 8px;border-radius:5px;border:1px solid var(--border);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .badge{font-family:var(--mono);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:3px 9px;border-radius:20px;}
+  .badge-receiving{background:rgba(96,165,250,.15);color:var(--blue);}
+  .badge-processing{background:rgba(124,106,247,.15);color:var(--accent);}
+  .badge-merging{background:rgba(251,191,36,.15);color:var(--yellow);}
+  .badge-completed{background:rgba(74,222,128,.15);color:var(--green);}
+  .badge-failed{background:rgba(248,113,113,.15);color:var(--red);}
+  .job-meta{display:flex;align-items:center;gap:20px;}
+  .job-age{font-size:11px;color:var(--muted);font-family:var(--mono);}
+
+  .job-progress{padding:0 20px 18px;}
+  .progress-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+  .progress-label{font-size:12px;color:var(--muted);}
+  .progress-count{font-family:var(--mono);font-size:12px;color:var(--text);}
+  .progress-track{height:6px;background:var(--surface);border-radius:99px;overflow:hidden;}
+  .progress-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .6s cubic-bezier(.4,0,.2,1);}
+  .progress-fill.done{background:var(--green);}
+
+  .parts-toggle{padding:0 20px 8px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;user-select:none;}
+  .parts-toggle:hover{color:var(--text);}
+  .chevron{transition:transform .2s;display:inline-block;font-style:normal;}
+  .chevron.open{transform:rotate(90deg);}
+  .parts-list{padding:4px 20px 18px;display:none;}
+  .parts-list.open{display:block;}
+  .part-item{display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;background:var(--surface);border-radius:8px;border:1px solid var(--border);font-size:11px;}
+  .part-num{font-family:var(--mono);font-weight:700;width:20px;text-align:center;color:var(--accent);}
+  .part-size{color:var(--muted);font-family:var(--mono);flex:1;}
+  .part-checksum{color:var(--muted);font-family:var(--mono);font-size:10px;}
+  .part-time{color:var(--muted);}
+
+  .merge-timer{padding:4px 20px 16px;font-family:var(--mono);font-size:12px;color:var(--yellow);display:flex;align-items:center;gap:8px;}
+  .spinner{width:12px;height:12px;border:2px solid rgba(251,191,36,.3);border-top-color:var(--yellow);border-radius:50%;animation:spin .8s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  .job-error{margin:0 20px 16px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2);border-radius:8px;padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--red);}
+
+  .empty{text-align:center;padding:80px 20px;color:var(--muted);}
+  .empty-icon{font-size:48px;margin-bottom:16px;opacity:.4;}
+  .empty-title{font-family:var(--mono);font-size:14px;margin-bottom:8px;}
+  .empty-sub{font-size:13px;}
+
+  @media(max-width:600px){
+    .stats{grid-template-columns:repeat(2,1fr);}
+    header{flex-direction:column;align-items:flex-start;gap:16px;}
+    .server-input input{width:160px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🎬</div>
+      <div>
+        <div class="logo-text">VideoForge</div>
+        <div class="logo-sub">Job Monitor</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="server-input">
+        <label>SERVER</label>
+        <input id="serverUrl" type="text" value="https://n8nvideo.onrender.com" placeholder="https://...">
+      </div>
+      <div class="pulse-dot off" id="connectionDot"></div>
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="stat-val" id="statTotal">—</div><div class="stat-label">Total Jobs</div></div>
+    <div class="stat"><div class="stat-val" id="statActive" style="color:var(--blue)">—</div><div class="stat-label">Active</div></div>
+    <div class="stat"><div class="stat-val" id="statMerging" style="color:var(--yellow)">—</div><div class="stat-label">Merging</div></div>
+    <div class="stat"><div class="stat-val" id="statDone" style="color:var(--green)">—</div><div class="stat-label">Completed</div></div>
+  </div>
+
+  <div class="lookup">
+    <label>LOOKUP JOB</label>
+    <input id="lookupId" type="text" placeholder="Paste job_id here…">
+    <button class="btn" onclick="lookupJob()">Check Status</button>
+  </div>
+
+  <div class="refresh-row">
+    <div class="section-title" style="margin:0">ALL JOBS</div>
+    <div style="flex:1"></div>
+    <button class="btn-ghost" onclick="fetchJobs()">↻ Refresh Now</button>
+    <div class="next-refresh" id="nextRefresh">auto-refresh in 5s</div>
+  </div>
+
+  <div class="jobs-list" id="jobsList">
+    <div class="empty">
+      <div class="empty-icon">📭</div>
+      <div class="empty-title">No jobs found</div>
+      <div class="empty-sub">Jobs will appear here once your workflow starts running.</div>
+    </div>
+  </div>
+
+</div>
+<script>
+const BASE=()=>document.getElementById('serverUrl').value.replace(/\/$/,'');
+let countdown=5, countdownTimer, expandedJobs=new Set();
+
+function fmtBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(2)+' MB';}
+function fmtAge(s){if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';return Math.floor(s/3600)+'h ago';}
+function fmtElapsed(s){if(s==null)return'—';if(s<60)return s+'s';return Math.floor(s/60)+'m '+(s%60)+'s';}
+
+function badge(s){
+  const m={receiving:'badge-receiving',processing:'badge-processing',merging:'badge-merging',completed:'badge-completed',failed:'badge-failed'};
+  return`<span class="badge ${m[s]||'badge-receiving'}">${s}</span>`;
+}
+
+function renderCard(job){
+  const pct=job.total>0?Math.round((job.received/job.total)*100):0;
+  const exp=expandedJobs.has(job.job_id);
+  const parts=job.parts_log||[];
+
+  let partsHtml='';
+  if(parts.length>0){
+    const rows=parts.map(p=>`
+      <div class="part-item">
+        <span class="part-num">${p.part}</span>
+        <span class="part-size">${fmtBytes(p.size_bytes)}</span>
+        <span class="part-checksum">md5: ${p.checksum?p.checksum.slice(0,12)+'…':'—'}</span>
+        <span class="part-time">${new Date(p.uploaded_at*1000).toLocaleTimeString()}</span>
+      </div>`).join('');
+    partsHtml=`
+      <div class="parts-toggle" onclick="toggleParts('${job.job_id}')">
+        <i class="chevron ${exp?'open':''}">▶</i>
+        <span>${parts.length} part${parts.length!==1?'s':''} uploaded</span>
+      </div>
+      <div class="parts-list ${exp?'open':''}" id="parts-${job.job_id}">${rows}</div>`;
+  }
+
+  const mergeHtml=job.status==='merging'?`
+    <div class="merge-timer">
+      <div class="spinner"></div>
+      Merging… ${fmtElapsed(job.merge_elapsed_seconds)} elapsed
+    </div>`:'';
+
+  const errHtml=job.error?`<div class="job-error">⚠ ${job.error}</div>`:'';
+  const fillCls=job.status==='completed'?'done':'';
+
+  return`
+    <div class="job-card status-${job.status}" id="card-${job.job_id}">
+      <div class="job-header" onclick="toggleParts('${job.job_id}')">
+        <div class="job-id-block">
+          ${badge(job.status)}
+          <span class="job-id" title="${job.job_id}">${job.job_id}</span>
+        </div>
+        <div class="job-meta">
+          <span class="job-age">${fmtAge(job.age_seconds)}</span>
+        </div>
+      </div>
+      <div class="job-progress">
+        <div class="progress-row">
+          <span class="progress-label">Parts uploaded</span>
+          <span class="progress-count">${job.received} / ${job.total}</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill ${fillCls}" style="width:${pct}%"></div>
+        </div>
+      </div>
+      ${mergeHtml}${partsHtml}${errHtml}
+    </div>`;
+}
+
+function toggleParts(jobId){
+  expandedJobs.has(jobId)?expandedJobs.delete(jobId):expandedJobs.add(jobId);
+  const card=document.getElementById('card-'+jobId);
+  if(!card)return;
+  card.querySelectorAll('.chevron').forEach(c=>c.classList.toggle('open',expandedJobs.has(jobId)));
+  card.querySelectorAll('.parts-list').forEach(l=>l.classList.toggle('open',expandedJobs.has(jobId)));
+}
+
+async function fetchJobs(){
+  const dot=document.getElementById('connectionDot');
+  try{
+    const res=await fetch(BASE()+'/jobs');
+    if(!res.ok)throw new Error(res.status);
+    const jobs=await res.json();
+    dot.classList.remove('off');
+
+    document.getElementById('statTotal').textContent=jobs.length;
+    document.getElementById('statActive').textContent=jobs.filter(j=>j.status==='receiving'||j.status==='processing').length;
+    document.getElementById('statMerging').textContent=jobs.filter(j=>j.status==='merging').length;
+    document.getElementById('statDone').textContent=jobs.filter(j=>j.status==='completed').length;
+
+    if(jobs.length===0){
+      document.getElementById('jobsList').innerHTML=`<div class="empty"><div class="empty-icon">📭</div><div class="empty-title">No jobs yet</div><div class="empty-sub">Jobs will appear once your workflow starts.</div></div>`;
+      return;
+    }
+
+    // Enrich active jobs with parts_log
+    const enriched=await Promise.all(jobs.map(async j=>{
+      if(['receiving','processing','merging'].includes(j.status)){
+        try{const r=await fetch(BASE()+'/status/'+j.job_id);if(r.ok)return await r.json();}catch(e){}
+      }
+      return j;
+    }));
+
+    document.getElementById('jobsList').innerHTML=enriched.map(renderCard).join('');
+  }catch(e){dot.classList.add('off');}
+}
+
+async function lookupJob(){
+  const id=document.getElementById('lookupId').value.trim();
+  if(!id)return;
+  try{
+    const res=await fetch(BASE()+'/status/'+id);
+    const data=await res.json();
+    if(data.error){alert('Error: '+data.error);return;}
+    expandedJobs.add(id);
+    const list=document.getElementById('jobsList');
+    const ex=document.getElementById('card-'+id);
+    if(ex)ex.remove();
+    const tmp=document.createElement('div');
+    tmp.innerHTML=renderCard(data);
+    list.prepend(tmp.firstElementChild);
+  }catch(e){alert('Could not reach server: '+e.message);}
+}
+
+document.getElementById('lookupId').addEventListener('keydown',e=>{if(e.key==='Enter')lookupJob();});
+
+function startCountdown(){
+  clearInterval(countdownTimer);countdown=5;
+  const el=document.getElementById('nextRefresh');
+  countdownTimer=setInterval(()=>{
+    countdown--;
+    el.textContent=`auto-refresh in ${countdown}s`;
+    if(countdown<=0){fetchJobs();countdown=5;}
+  },1000);
+}
+
+fetchJobs();
+startCountdown();
+</script>
+</body>
+</html>
